@@ -1,0 +1,250 @@
+// SO2 IS1 222B LAB05
+// Gracjan Puch
+// pg41490@zut.edu.pl
+// gcc 41490.so2.lab05.main.c -o lab05
+// ./lab05 -df /etc
+
+#define OPTION_L 4
+#define OPTION_d 2
+#define OPTION_f 1
+#define COLOR_NORMAL  "\x1B[0m"
+#define COLOR_BOLDBLUE  "\033[1m\033[34m"
+
+
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <string.h>
+#include <stdbool.h>
+
+typedef struct FolderStruct
+{
+    char folderPath[PATH_MAX];
+    int indentLevel;
+    DIR* dStream;
+    int fileIndex;
+} FolderStruct;
+
+int directories = 0;
+int files = 0;
+FolderStruct **folderStack;
+int folderStackSize = 0;
+int indentAmount=2;
+
+void Push(FolderStruct*** stack, int* stackSize, char *folderPath, int indentLevel, DIR* dStream, int fileIndex)
+{
+    //printf("Trying to push: %s %d\n", folderPath, indentLevel);
+    *stack = realloc(*stack, sizeof(FolderStruct *) * ((*stackSize) + 1));
+    //printf("Realloc finished, %d -> %d\n", folderStackSize, folderStackSize + 1);
+    for (int i = (*stackSize) - 1; i >= 0; i--)
+    {
+        (*stack)[i + 1] = (*stack)[i];
+    }
+    //printf("Copying finished\n");
+    (*stack)[0] = malloc(sizeof(FolderStruct));
+    //printf("Malloc finished\n");
+    strcpy((*stack)[0]->folderPath, folderPath);
+    (*stack)[0]->indentLevel = indentLevel;
+    (*stack)[0]->dStream=dStream;
+    (*stack)[0]->fileIndex=fileIndex;
+    //printf("Initializing finished\n");
+    (*stackSize)++;
+}
+
+FolderStruct* Pop(FolderStruct*** stack, int* stackSize)
+{
+    if (*stackSize == 0)
+        return NULL;
+
+    FolderStruct *out = (*stack)[0];
+    //printf("Poping folder info: %s %d\n", out->folderPath, out->indentLevel);
+    for (int i = 1; i < *stackSize; i++)
+    {
+        (*stack)[i - 1] = (*stack)[i];
+    }
+    //printf("Stack moved\n");
+    (*stackSize)--;
+    *stack = realloc(*stack, (*stackSize) * sizeof(FolderStruct *));
+    //printf("Stack reallocated\n");
+    return out;
+}
+
+void PrintLine(char *name, int indentation, char* color)
+{
+    printf("├");
+    for (int i = 0; i < indentation; i++)
+    {
+        printf("─");
+    }
+    printf("%s", color);
+    printf(" %s%s\n", name, COLOR_NORMAL);
+}
+
+FolderStruct** ClearStack(FolderStruct** stack, int* stackSize)
+{
+    for (int i = 0; i < (*stackSize); i++)
+    {
+        if (stack[i]->dStream != NULL)
+            closedir(stack[i]->dStream);
+
+        free(stack[i]);
+    }
+
+    free(stack);
+}
+
+int main(int argc, char *argv[])
+{
+    char startingDirectory[PATH_MAX];
+
+    int op;
+    short mode = 0;
+    int maxDepth=-1;
+    //pobieranie opcji
+    while ((op=getopt(argc, argv, "dfL:")) != -1)
+    {
+            switch (op)
+            {
+                    case 'd':
+                            mode=mode | OPTION_d;
+                            break;
+                    case 'f':
+                            mode = mode | OPTION_f;
+                            break;
+                    case 'L':
+                            mode = mode | OPTION_L;
+                            maxDepth=atoi(optarg);
+                            break;
+            }
+    }
+
+    if (optind < argc)
+    {
+        strcpy(startingDirectory,argv[optind]);
+    }
+    else
+        getcwd(startingDirectory, PATH_MAX);
+
+    //struct dirent *ent;
+    struct dirent** ent;
+
+    Push(&folderStack, &folderStackSize, startingDirectory, 0, NULL, 0);
+    FolderStruct* currentFolder;
+
+    printf(".\n"); //starting dot of current folder
+
+    while (1)
+    {
+        currentFolder = Pop(&folderStack, &folderStackSize);
+        printf("Stack count: %d\n", folderStackSize);
+
+        if (currentFolder == NULL)
+            break;
+
+        DIR *ds = currentFolder->dStream;
+        if (ds == NULL)
+        {
+            ds=opendir(currentFolder->folderPath);
+            currentFolder->dStream=ds;
+            currentFolder->fileIndex=0;
+        }
+
+        if (ds == NULL)
+        {
+            printf("Nie mozna otworzyc katalogu: %s\n", currentFolder->folderPath);
+            continue;
+        }
+        else
+        {
+            while (1)
+            {
+                //ent = readdir(ds);
+                int currentDirCount = scandir(currentFolder->folderPath, &ent, NULL, &alphasort);
+                //printf("FOlder count: %d\n", currentDirCount);
+                if ( currentDirCount <=0)
+                {
+                    closedir(ds);
+                    break;
+                }
+                /*if (ent == NULL)
+                {
+                    closedir(ds);
+                    break;
+                }*/
+                
+                bool print = true;
+                bool hasToBreak = false;
+
+                while (currentFolder->fileIndex < currentDirCount-1)
+                {
+                    printf("Read: %d\n", currentFolder->fileIndex);
+                    struct dirent* entry = ent[currentFolder->fileIndex];
+                    printf("Folder name: %s\n", entry->d_name);
+
+                    switch (entry->d_type)
+                    {
+                    case DT_DIR:
+                        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+                        {
+                            printf("It's a folder\n");
+                            char* path = calloc(strlen(currentFolder->folderPath)+1+strlen(entry->d_name)+1, sizeof(char)); //+1 slash
+                            strcat(path, currentFolder->folderPath);
+                            strcat(path, "/");
+                            strcat(path, entry->d_name);
+                            Push(&folderStack, &folderStackSize, currentFolder->folderPath, currentFolder->indentLevel, ds, currentFolder->fileIndex);
+                            printf("Added current on stack\n");
+                            if (
+                            ((mode & OPTION_L) && ((currentFolder->indentLevel+indentAmount)/indentAmount<=maxDepth)) //jesli opcja L i glebokosc nastepnego folderu mniejsza/rowna maksymalnej
+                            ||
+                            ((mode & OPTION_L) == 0) //lub jesli nie ma opcji L
+                            )
+                            {
+                                Push(&folderStack, &folderStackSize, path, currentFolder->indentLevel+indentAmount, NULL, 0);
+                                printf("Added next on stack\n");
+                            }
+                            hasToBreak=true;
+                            directories++;
+                            free(path);
+                        }
+                        else
+                            print = false;
+                        break;
+                    case DT_REG:
+                        if (mode & OPTION_d)
+                            print=false;
+                        else
+                            files++;
+                        break;
+                    }
+                    currentFolder->fileIndex++;
+
+                    if (print)
+                    {
+                        printf("PRinting\n");
+                        char* path = (mode & OPTION_f) ? calloc(strlen(currentFolder->folderPath)+strlen(entry->d_name)+1, sizeof(char)) : calloc(strlen(entry->d_name)+2, sizeof(char));
+
+                        if (mode & OPTION_f)
+                        {
+                            strcat(path, currentFolder->folderPath);
+                            strcat(path,"/");
+                        }
+
+                        strcat(path, entry->d_name);
+                        PrintLine(path, currentFolder->indentLevel, ((entry->d_type == DT_DIR) ? COLOR_BOLDBLUE : COLOR_NORMAL));
+                        free(path);
+                    }
+                    if (hasToBreak)
+                        break;
+                }
+            }
+        }
+    }
+
+    printf("\n%d katalogow",directories);
+    if ((mode & OPTION_d) == 0)
+        printf(", %d plikow",files);
+    
+    printf("\n");
+}
