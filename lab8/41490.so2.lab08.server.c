@@ -1,10 +1,11 @@
 // SO2 IS1 222B LAB08
 // Gracjan Puch
 // pg41490@zut.edu.pl
-// gcc 41490.so2.lab08.main.c -o lab08s
-// ./lab08 -p 8003
+// gcc 41490.so2.lab08.server.c -o lab08s
+// ./lab08s -p 8003
 
 #define _GNU_SOURCE
+#define DEBUG_MODE 0
 #define MAX_CLIENTS 16
 
 #define MESSAGE_TYPE_GET_CLIENTS 0
@@ -13,6 +14,7 @@
 #define MESSAGE_TYPE_SET_ID 3
 #define MESSAGE_TYPE_PING 4
 #define MESSAGE_TYPE_SET_NAME 5
+#define MESSAGE_TYPE_DISCONNECT 6
 #define MAX_CONTENT_LENGTH 1024+(7) //7 additional characters for commmand
 
 #include <unistd.h>
@@ -27,14 +29,15 @@
 #include <signal.h>
 
 
-int s; //socket
+int s = -1; //socket
+int highestFD = -1;
 fd_set connSet;
 
 #pragma pack(1)
 typedef struct Message
 {
     int senderID;
-    char senderName[1024];
+    char senderName[256];
     int messageType;
     char content[MAX_CONTENT_LENGTH];
 } Message;
@@ -42,20 +45,51 @@ typedef struct Message
 
 typedef struct Client {
     int clientID;
-    char name[1024];
-    Message** receivedMessages;
+    char name[256];
 } Client;
 
 
 
 Client** connectedClients;
 
+void SetHighestFD()
+{
+    highestFD = s;
+    for (int i=0; i < MAX_CLIENTS; i++)
+    {
+        if (connectedClients[i]==NULL)
+            continue;
+
+        if (connectedClients[i]->clientID > highestFD)
+            highestFD=connectedClients[i]->clientID;
+    }
+}
+
+void SendToAll(char* content)
+{
+    Message m;
+    m.senderID=0;
+    strcpy(m.senderName, "Serwer");
+    m.messageType = MESSAGE_TYPE_RECEIVE_MESSAGE;
+    strcpy(m.content, "0 ");
+    strcat(m.content, content);
+    printf("Wysylam wiadomosc do wszystkich: %s\n", m.content);
+
+    for (int i=0; i < MAX_CLIENTS;i++)
+    {
+        if (connectedClients[i]==NULL)
+            continue;
+
+        send(connectedClients[i]->clientID, &m, sizeof(Message), 0);
+    }
+}
+
 void VerifyClients()
 {
     fd_set set;
     FD_ZERO(&set);
     struct timeval time;
-    time.tv_sec=3;
+    time.tv_sec=1;
     printf("Odswiezam klientow\n");
 
     for (int i=0; i < MAX_CLIENTS; i++)
@@ -75,22 +109,34 @@ void VerifyClients()
         {
             printf("Nie udalo sie wyslac pinga do %d: %s", connectedClients[i]->clientID, strerror(errno));
         }
-        int k = select(MAX_CLIENTS, &set, NULL, NULL, &time);
+        int k = select(connectedClients[i]->clientID+1, &set, NULL, NULL, &time);
         int l = recv(connectedClients[i]->clientID, &m, sizeof(Message), 0);
+        if (l == -1)
+        {
+            printf("Wystapil problem z recv() - %s\n", strerror(errno));
+        }
 
-        if (!FD_ISSET(connectedClients[i]->clientID, &set) || l ==0)
+        if (!FD_ISSET(connectedClients[i]->clientID, &set) || l==0)
         {
             printf("\tBrak odpowiedzi od %d. Uniewazniam poleczenie.\n", connectedClients[i]->clientID);
+
+            char mess[1024];
+            sprintf(mess, "Uzytwonik %s [ID:%d] wychodzi.\n", connectedClients[i]->name, connectedClients[i]->clientID);
+
             shutdown(connectedClients[i]->clientID, SHUT_RDWR);
             close(connectedClients[i]->clientID);
             free(connectedClients[i]);
             connectedClients[i]=NULL;
+
+
+            SendToAll(mess);
         }
         else
         {
             printf("\tOdpowiedz od %d.\n", connectedClients[i]->clientID);
         }
     }
+    SetHighestFD();
 }
 
 void AddClient(int clientID)
@@ -98,7 +144,6 @@ void AddClient(int clientID)
     Client* c = calloc(1,sizeof(Client));
     c->clientID=clientID;
     strcpy(c->name, "NONAME");
-    c->receivedMessages=calloc(MAX_CLIENTS, sizeof(Message*));
 
     for (int i=0; i < MAX_CLIENTS; i++)
     {
@@ -154,6 +199,8 @@ void SetupSelect()
     }
 }
 
+
+
 void Interrupt(int s)
 {
     shutdown(s, SHUT_RDWR);
@@ -164,8 +211,10 @@ void Interrupt(int s)
         {
             shutdown(connectedClients[i]->clientID, SHUT_RDWR);
             close(connectedClients[i]->clientID);
+            free(connectedClients[i]);
         }
     }
+    free(connectedClients);
     printf("\nZamknieto socket\n");
     exit(0);
 }
@@ -182,31 +231,77 @@ int main(int argc, char* argv[])
     act.sa_flags=0;
     sigaction(SIGINT, &act, NULL);
 
+    char* port = "8003";
 
-    char pid[8];
-    char killName[1024];
-    //sprintf(killName, "kill -9 $(pidof -o %d %s)", getpid(), argv[0]);
-    sprintf(killName, "pidof -o %d %s", getpid(), argv[0]);
-   // printf("Opening %s\n", killName);
-    FILE* cmd = popen(killName, "r");
-    strcpy(killName, "");
-    fgets(pid, 8, cmd);
+    int op=getopt(argc, argv, "qp:");
 
-    if (strlen(killName) > 0)
+    if (op == -1)
     {
-        sprintf(killName, "kill -9 %s", pid);
-        printf("Serwer jest juz uruchomiony, jego PID to %s. Poprzednia instancja zostanie zamknieta.\n", pid);
-        system(killName);
+        printf("Serwer nalezy uruchomic z jedna z dwoch opcji:\n \
+                \t-p port - spowoduje uruchomienie serwera na porcie 'port'\n\
+                \t-q - spowoduje zakonczenie uruchomionej instancji\n");
+        exit(1);
     }
 
+    
+    if (op == 'p')
+        port=optarg;
+
+
+    char* pid = calloc(8, sizeof(char));
+    char killName[1024];
+    sprintf(killName, "pidof -o %d %s", getpid(), argv[0]);
+    FILE* cmd = popen(killName, "r");
+    strcpy(killName, "");
+
+
+    if (fgets(pid, 8, cmd) != NULL)
+    {
+        sprintf(killName, "kill %s", pid);
+        system(killName);
+        if (op == 'q')
+        {
+            printf("Pomyslnie zamknieto instancje serwera. Jego PID: %d\n", atoi(pid));
+            exit(EXIT_SUCCESS);
+        }
+        else
+            printf("Serwer jest juz uruchomiony. Poprzednia jego instancja zostanie zamknieta.\n");
+    }
+    else
+    {
+        if (op == 'q')
+        {
+            printf("Uzyto opcji '-q' jednak na tej maszynie nie istnieje obecnie uruchomiona instancja serwera.\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+    free(pid);
+    
+
     pclose(cmd);
+
+    if (fork() > 0)
+    {
+        printf("Utworzono proces potomny. Nastepuje oddzielenie od terminala.\n");
+        exit(1);
+    }
+
+    if (!DEBUG_MODE)
+    {
+        freopen("/dev/null", "w", stdin);
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+    }
+
+    setsid();
+
 
     connectedClients = calloc(MAX_CLIENTS, sizeof(Client*));
 
 
     struct sockaddr_in servaddr;
     servaddr.sin_family=AF_INET;
-    servaddr.sin_port=htons(8003);
+    servaddr.sin_port=htons(atoi(port));
     servaddr.sin_addr.s_addr=htons(INADDR_ANY);
 
 
@@ -214,19 +309,19 @@ int main(int argc, char* argv[])
     if (s == -1)
     {
         printf("Blad socket(), %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
     }
+    SetHighestFD();
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
     if (bind(s,(struct sockaddr*)&servaddr,sizeof(servaddr)) == -1)
     {
         printf("Blad bind(), %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
     }
 
     listen(s, MAX_CLIENTS);
 
     struct sockaddr clientaddr;
-
-    
-
     int addrlen=sizeof(clientaddr);
     printf("Oczekuje na polaczenie\n");
 
@@ -240,7 +335,7 @@ int main(int argc, char* argv[])
     {
         SetupSelect();
 
-        if (pselect(MAX_CLIENTS+1, &connSet, NULL, NULL, &t, NULL) > 0)
+        if (pselect(highestFD+1, &connSet, NULL, NULL, &t, NULL) > 0)
         {
             if (FD_ISSET(s, &connSet))
             {
@@ -250,10 +345,17 @@ int main(int argc, char* argv[])
                     printf("Accept error: %s\n", strerror(errno));    
                 }
 
+                if (id > highestFD)
+                    highestFD=id;
+
                 printf("Client connected: %d\n", id);
 
                 AddClient(id);
                 VerifyClients();
+                char mess[1024];
+                Client* c = GetClientByID(id);
+                sprintf(mess, "Dolaczyl nowy uzytkownik: %s [ID:%d]", c->name, c->clientID);
+                SendToAll(mess);
                 PrintClients();
             }
             for (int i=0; i < MAX_CLIENTS; i++)
@@ -282,10 +384,18 @@ int main(int argc, char* argv[])
                                 strcat(clientIDs.content, ",");
                                 strcat(clientIDs.content, connectedClients[i]->name);
 
-                                if (i+1 != MAX_CLIENTS && connectedClients[i+1]!= NULL)
-                                    strcat(clientIDs.content, ",");
+                                //if (i+1 != MAX_CLIENTS && connectedClients[i+1]!= NULL)
+                                strcat(clientIDs.content, ",");
                             }
-                            strcat(clientIDs.content, ".");
+                            //strcat(clientIDs.content, ".");
+                            char* x = calloc(1024, sizeof(char));
+                            strcpy(x, clientIDs.content);
+                            char* lastComma = strrchr(x, ',');
+                            *lastComma='.';
+                            strcpy(clientIDs.content, x);
+                            free(x);
+                            
+
                             printf("\tWyslano liste skladajaca sie z: %s\n", clientIDs.content);
                             send(connectedClients[i]->clientID, &clientIDs, sizeof(clientIDs), 0);
                         }
@@ -320,7 +430,10 @@ int main(int argc, char* argv[])
                             strcpy(connectedClients[mess.senderID]->name, mess.content);
                             printf("Klient o ID %d jest od teraz znany jako %s\n", mess.senderID, connectedClients[mess.senderID]->name);
                         }
-                        
+                        else if (mess.messageType == MESSAGE_TYPE_DISCONNECT)
+                        {
+                            VerifyClients();
+                        }
                     }
                 }
             }

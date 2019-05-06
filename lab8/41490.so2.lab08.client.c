@@ -2,7 +2,7 @@
 // Gracjan Puch
 // pg41490@zut.edu.pl
 // gcc 41490.so2.lab08.main.c -o lab08c
-// ./lab08 -p 8003
+// ./lab08c -a 127.0.0.1 -p 8003 -n Test
 
 
 #define MESSAGE_TYPE_GET_CLIENTS 0
@@ -11,6 +11,7 @@
 #define MESSAGE_TYPE_SET_ID 3
 #define MESSAGE_TYPE_PING 4
 #define MESSAGE_TYPE_SET_NAME 5
+#define MESSAGE_TYPE_DISCONNECT 6
 
 #define MAX_CONTENT_LENGTH 1024+(7) //7 additional characters for commmand
 
@@ -25,18 +26,26 @@
 #include <signal.h>
 #include <errno.h>
 
+int s=-1;
+int myID=-1;
+
 #pragma pack(1)
 typedef struct Message
 {
     int senderID;
-    char senderName[1024];
+    char senderName[256];
     int messageType;
     char content[MAX_CONTENT_LENGTH];
 } Message;
 #pragma pack(0)
 
-void Interrupt(int s)
+void Interrupt(int k)
 {
+    Message m;
+    m.senderID=myID;
+    m.messageType=MESSAGE_TYPE_DISCONNECT;
+    send(s, &m,sizeof(Message),0);
+
     shutdown(s, SHUT_RDWR);
     printf("\nZamknieto socket\n");
     exit(0);
@@ -44,7 +53,7 @@ void Interrupt(int s)
 
 void PrintInfo()
 {
-    printf("Wybierz akcje:\nWpisz 'get' aby wypisac liste klientow\nWpisz 'send [id] [zawartosc] zeby wyslac wiadomosc do uzytkownika\nWpisz 'exit' aby wyjsc\n");
+    printf("Wybierz akcje:\nWpisz 'get' aby wypisac liste uzytkownikow\nWpisz 'send [id] [zawartosc] zeby wyslac wiadomosc do uzytkownika\nWpisz 'exit' aby wyjsc\n");
 }
 
 int main(int argc, char* argv[])
@@ -59,10 +68,16 @@ int main(int argc, char* argv[])
     act.sa_flags=0;
     sigaction(SIGINT, &act, NULL);
 
-    char* ip = "127.0.0.1";
-    char* port = "8003";
+    char* ip = NULL;
+    char* port = NULL;
 
-    char* username="NONAME";
+    char* username=NULL;
+
+    if (argc == 1)
+    {
+        printf("Program nalezy uruchomic z trzema przelacznikami.\n-a [adres ip] - gdzie nalezy podac adres IP (np. 127.0.0.1)\n-p [port] - gdzie nalezy podac port (np. 8003)\n-n [name] - gdzie nalezy podac swoj pseudonim (np. Test)\n");
+        exit(EXIT_SUCCESS);
+    }
 
     int op;
     while ((op=getopt(argc, argv, "a:p:n:")) != -1)
@@ -81,6 +96,21 @@ int main(int argc, char* argv[])
             }
     }
 
+    if (ip == NULL)
+    {
+        printf ("Nie sprecyzowano adresu IP!\n");
+        exit(EXIT_FAILURE);
+    }
+    else if (port == NULL)
+    {
+        printf ("Nie sprecyzowano portu!\n");
+        exit(EXIT_FAILURE);
+    }
+    else if (username == NULL)
+    {
+        printf ("Nie podano pseudonimu!\n");
+        exit(EXIT_FAILURE);
+    }
 
     struct sockaddr_in servaddr;
     servaddr.sin_family=AF_INET;
@@ -88,7 +118,7 @@ int main(int argc, char* argv[])
     servaddr.sin_addr.s_addr=inet_addr(ip);
 
 
-    int s = socket(AF_INET, SOCK_STREAM, 0);
+    s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == -1)
     {
         printf("Blad socket()");
@@ -101,7 +131,6 @@ int main(int argc, char* argv[])
     }
 
     printf("Polaczono do serwera, socket: %d.\n", s);
-    int myID = -1;
 
     Message idMess;
     recv(s, &idMess, sizeof(idMess), 0);
@@ -127,7 +156,7 @@ int main(int argc, char* argv[])
 
         int k= select(16, &set, NULL, NULL, &time);
         if (k == -1)
-            printf("SElect zwrocil blad: %s\n", strerror(errno));
+            printf("Select zwrocil blad: %s\n", strerror(errno));
         
 
         if (FD_ISSET(s, &set))
@@ -143,10 +172,10 @@ int main(int argc, char* argv[])
                 Interrupt(0);
             }
 
-            printf("Otrzymano wiadomosc od %d o typie %d z zawartoscia %s\n", m.senderID, m.messageType, m.content);
+            //printf("Otrzymano wiadomosc od %d o typie %d z zawartoscia %s\n", m.senderID, m.messageType, m.content);
             if (m.messageType ==  MESSAGE_TYPE_PING)
             {
-                printf("\tWysylam ping\n");
+                //printf("\tWysylam ping\n");
                 m.senderID=myID;
                 strcat(m.content, "Response");
 
@@ -159,7 +188,10 @@ int main(int argc, char* argv[])
                 char content[1024];
                 sscanf(m.content, "%d %1024[^\n]", &id, content);
                 fflush(stdin);
-                printf("Otrzymano wiadomosc od %d:%s\n", id, content);
+                if (id == 0)
+                    printf("Serwer: %s\n", content);
+                else
+                    printf("\n\tOtrzymano wiadomosc od %s[ID:%d]:%s\n\n", m.senderName, id, content);
             }
 
         }
@@ -183,8 +215,8 @@ int main(int argc, char* argv[])
                 //there is a ping when retrieving clients list
                 Message ping;
                 recv(s,&ping, sizeof(Message),0);
-                if (ping.messageType == MESSAGE_TYPE_PING)
-                    printf("Otrzymano ping\n");
+                /*if (ping.messageType == MESSAGE_TYPE_PING)
+                    printf("Otrzymano ping\n");*/
 
                 ping.senderID=myID;
                 strcat(ping.content, "Response");
@@ -200,10 +232,10 @@ int main(int argc, char* argv[])
                     if (*(offset-1) == '.')
                         break;
 
-                    char id[1024];
-                    char name[1024];
+                    char id[1024] = {0};
+                    char name[1024] = {0};
                     char* firstComma=strchr(offset, ',');
-                    printf("first comma at:%ld\n", firstComma-offset);
+                    //printf("first comma at:%ld\n", firstComma-offset);
                     strncpy(id, offset, firstComma-offset);
                     offset=firstComma+1;
 
@@ -211,11 +243,11 @@ int main(int argc, char* argv[])
                     if (secondComma == NULL)
                         secondComma=strchr(offset, '.');
 
-                    printf("second comma at:%ld\n", secondComma-offset);
+                    //printf("second comma at:%ld\n", secondComma-offset);
                     strncpy(name, offset, secondComma-offset);
                     offset=secondComma+1;
 
-                    printf("\t%s [ID:%s]\n", name, id);
+                    printf("\t%s [ID:%d]\n", name, atoi(id));
                 }
 
                 PrintInfo();
@@ -225,14 +257,17 @@ int main(int argc, char* argv[])
                 int clientID;
                 char message[1024];
                 sscanf(input, "%*s %d %1024[^\n]", &clientID, message);
+
+                if (clientID == 0)
+                    {
+                        printf("Nie mozna wyslac wiadomosci besposrednio do serwera.\n");
+                        continue;
+                    }
                 
                 Message req;
                 req.senderID=myID;
-
-
+                strcpy(req.senderName, username);
                 sprintf(req.content, "%d %s", clientID, message);
-
-
                 req.messageType=MESSAGE_TYPE_SEND_MESSAGE;
                 send(s, &req, sizeof(req), 0);
                 printf("Wyslano do %d wiadomosc: %s\n",clientID, message);
